@@ -9,6 +9,7 @@
 #  - Set the hostname to win11
 #  - Configure the static IPv4 network settings
 #  - Write the Lab 5 managed hosts-file block
+#  - Set all Windows network profiles to Private
 #  - Enable WinRM / PowerShell remoting for Ansible
 #  - Configure local account remote admin behavior
 #  - Create the local ansible service account
@@ -26,6 +27,15 @@
 # Version History
 # ==============================================================================
 #
+# Version: 5.1
+# Date: 2026-06-27
+#
+# Changes:
+#  - Set all network profiles to Private before configuring WinRM.
+#  - Changed Enable-PSRemoting to use -SkipNetworkProfileCheck.
+#  - Improved WinRM setup so Public network profile errors are avoided.
+#  - Improved final validation output.
+#
 # Version: 5.0
 # Date: 2026-06-27
 #
@@ -34,6 +44,8 @@
 #  - Added hostname, network, hosts file, WinRM, registry, firewall, and user setup.
 #
 # ==============================================================================
+
+$ErrorActionPreference = "Stop"
 
 
 # ==============================================================================
@@ -126,7 +138,7 @@ function Get-PrimaryAdapter {
 
     $Adapter = Get-NetAdapter |
         Where-Object { $_.Status -eq "Up" -and $_.HardwareInterface -eq $true } |
-        Sort-Object -Property InterfaceMetric |
+        Sort-Object -Property Name |
         Select-Object -First 1
 
     if (-not $Adapter) {
@@ -158,16 +170,24 @@ function Set-Lab5Network {
 
     $CurrentDefaultRoute = Get-NetRoute -InterfaceAlias $InterfaceAlias -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue
 
-    $NeedsIPChange = $true
+    $HasDesiredIP = $false
 
     foreach ($Address in $CurrentIPv4) {
         if ($Address.IPAddress -eq $Win11IP -and $Address.PrefixLength -eq $PrefixLength) {
-            $NeedsIPChange = $false
+            $HasDesiredIP = $true
         }
     }
 
-    if ($NeedsIPChange) {
-        Write-Warn "IPv4 address is not in desired state. Reconfiguring adapter."
+    $HasDesiredGateway = $false
+
+    foreach ($Route in $CurrentDefaultRoute) {
+        if ($Route.NextHop -eq $Gateway) {
+            $HasDesiredGateway = $true
+        }
+    }
+
+    if (-not $HasDesiredIP -or -not $HasDesiredGateway) {
+        Write-Warn "IPv4 address or gateway is not in desired state. Reconfiguring adapter."
 
         foreach ($Address in $CurrentIPv4) {
             Write-Info "Removing old IPv4 address: $($Address.IPAddress)/$($Address.PrefixLength)"
@@ -180,10 +200,10 @@ function Set-Lab5Network {
         }
 
         New-NetIPAddress -InterfaceAlias $InterfaceAlias -IPAddress $Win11IP -PrefixLength $PrefixLength -DefaultGateway $Gateway | Out-Null
-        Write-Pass "Static IPv4 address configured"
+        Write-Pass "Static IPv4 address and gateway configured"
     }
     else {
-        Write-Pass "Static IPv4 address already configured correctly"
+        Write-Pass "Static IPv4 address and gateway already configured correctly"
     }
 
     $CurrentDns = (Get-DnsClientServerAddress -InterfaceAlias $InterfaceAlias -AddressFamily IPv4).ServerAddresses
@@ -198,28 +218,28 @@ function Set-Lab5Network {
     }
 }
 
-function Set-Lab5NetworkProfile {
-    param(
-        [Parameter(Mandatory=$true)]
-        $Adapter
-    )
+function Set-Lab5NetworkProfilesPrivate {
+    Write-Step "Setting all network profiles to Private"
 
-    Write-Step "Setting network profile to Private"
+    $Profiles = Get-NetConnectionProfile -ErrorAction SilentlyContinue
 
-    $Profile = Get-NetConnectionProfile -InterfaceAlias $Adapter.Name -ErrorAction SilentlyContinue
-
-    if (-not $Profile) {
-        Write-Warn "Could not find network profile for adapter: $($Adapter.Name)"
+    if (-not $Profiles) {
+        Write-Warn "Could not find any network profiles"
         return
     }
 
-    if ($Profile.NetworkCategory -eq "Private") {
-        Write-Pass "Network profile is already Private"
-    }
-    else {
-        Write-Info "Changing network profile from $($Profile.NetworkCategory) to Private"
-        Set-NetConnectionProfile -InterfaceAlias $Adapter.Name -NetworkCategory Private
-        Write-Pass "Network profile set to Private"
+    foreach ($Profile in $Profiles) {
+        Write-Info "Interface: $($Profile.InterfaceAlias)"
+        Write-Info "Current category: $($Profile.NetworkCategory)"
+
+        if ($Profile.NetworkCategory -eq "Private") {
+            Write-Pass "$($Profile.InterfaceAlias) is already Private"
+        }
+        else {
+            Write-Info "Changing $($Profile.InterfaceAlias) from $($Profile.NetworkCategory) to Private"
+            Set-NetConnectionProfile -InterfaceIndex $Profile.InterfaceIndex -NetworkCategory Private
+            Write-Pass "$($Profile.InterfaceAlias) set to Private"
+        }
     }
 }
 
@@ -297,13 +317,13 @@ function Enable-Lab5WinRM {
     Write-Info "Running winrm quickconfig"
     winrm quickconfig -quiet
 
-    Write-Info "Enabling PowerShell remoting"
-    Enable-PSRemoting -Force
+    Write-Info "Enabling PowerShell remoting with network profile skip check"
+    Enable-PSRemoting -SkipNetworkProfileCheck -Force
 
     Write-Info "Allowing unencrypted WinRM traffic for lab HTTP/NTLM setup"
     Set-Item -Path WSMan:\localhost\Service\AllowUnencrypted -Value $true
 
-    Write-Info "Enabling Basic and NTLM-compatible local authentication settings"
+    Write-Info "Enabling Basic authentication setting"
     Set-Item -Path WSMan:\localhost\Service\Auth\Basic -Value $true -ErrorAction SilentlyContinue
 
     Write-Info "Configuring LocalAccountTokenFilterPolicy for local admin remote access"
@@ -335,7 +355,8 @@ function Ensure-Lab5AnsibleUser {
     else {
         Write-Info "Local user already exists: $AnsibleUser"
         Write-Info "Resetting password to the Lab 5 desired value"
-        Set-LocalUser -Name $AnsibleUser -Password $SecurePassword -PasswordNeverExpires $true
+        Set-LocalUser -Name $AnsibleUser -Password $SecurePassword
+        Set-LocalUser -Name $AnsibleUser -PasswordNeverExpires $true
         Enable-LocalUser -Name $AnsibleUser
         Write-Pass "Local user confirmed and password reset: $AnsibleUser"
     }
@@ -343,9 +364,15 @@ function Ensure-Lab5AnsibleUser {
     $AdminMembers = Get-LocalGroupMember -Group "Administrators" -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty Name
 
-    $ExpectedLocalName = "$env:COMPUTERNAME\$AnsibleUser"
+    $AlreadyAdmin = $false
 
-    if ($AdminMembers -contains $ExpectedLocalName -or $AdminMembers -contains $AnsibleUser) {
+    foreach ($Member in $AdminMembers) {
+        if ($Member -eq $AnsibleUser -or $Member -like "*\$AnsibleUser") {
+            $AlreadyAdmin = $true
+        }
+    }
+
+    if ($AlreadyAdmin) {
         Write-Pass "$AnsibleUser is already a member of Administrators"
     }
     else {
@@ -379,7 +406,7 @@ function Show-Lab5Validation {
     Get-DnsClientServerAddress -AddressFamily IPv4 |
         Format-Table InterfaceAlias,ServerAddresses -AutoSize
 
-    Write-Info "Network profile:"
+    Write-Info "Network profiles:"
     Get-NetConnectionProfile |
         Format-Table InterfaceAlias,NetworkCategory -AutoSize
 
@@ -413,7 +440,7 @@ function Main {
     $Adapter = Get-PrimaryAdapter
 
     Set-Lab5Network -Adapter $Adapter
-    Set-Lab5NetworkProfile -Adapter $Adapter
+    Set-Lab5NetworkProfilesPrivate
 
     $HostnameChanged = Set-Lab5Hostname
     if ($HostnameChanged) {
