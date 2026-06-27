@@ -7,9 +7,10 @@
 #
 # Purpose:
 #  - Check required control node commands for Lab 5
-#  - Install OS packages needed for Python package management
+#  - Detect the Python interpreter used by Ansible
+#  - Install pip for the Ansible Python interpreter when needed
 #  - Install Python WinRM dependencies needed for Ansible Windows management
-#  - Verify that the control node can import winrm, requests, and requests_ntlm
+#  - Verify that Ansible's Python can import winrm, requests, and requests_ntlm
 #
 # Design:
 #  - This file does not auto-run actions when sourced.
@@ -24,6 +25,16 @@
 # ==============================================================================
 # Version History
 # ==============================================================================
+#
+# Version: 5.1
+# Date: 2026-06-27
+#
+# Changes:
+#  - Added Ansible Python interpreter detection.
+#  - Updated Python module checks to use the same Python interpreter Ansible uses.
+#  - Added pip package detection for Ansible's Python.
+#  - Added idempotent helper to install python3.12-pip when Ansible uses Python 3.12.
+#  - Fixed dependency workflow so pywinrm installs into the correct Python environment.
 #
 # Version: 5.0
 # Date: 2026-06-27
@@ -49,6 +60,51 @@ LAB5_PACKAGES_SH_LOADED="true"
 
 
 # ==============================================================================
+# Ansible Python Detection
+# ==============================================================================
+
+get_ansible_python_interpreter() {
+    local python_path
+
+    python_path="$(ansible --version 2>/dev/null | awk -F'[()]' '/python version/ {print $2}' | awk '{print $1}')"
+
+    if [[ -z "$python_path" ]]; then
+        fail "Could not detect Ansible Python interpreter from ansible --version"
+        return 1
+    fi
+
+    if [[ ! -x "$python_path" ]]; then
+        fail "Detected Ansible Python is not executable: ${python_path}"
+        return 1
+    fi
+
+    printf '%s\n' "$python_path"
+}
+
+show_ansible_python_context() {
+    local ansible_python
+
+    step "Showing Ansible Python context"
+
+    ansible --version || {
+        fail "Unable to run ansible --version"
+        return 1
+    }
+
+    ansible_python="$(get_ansible_python_interpreter)" || return 1
+
+    info "Ansible Python interpreter: ${ansible_python}"
+
+    "$ansible_python" --version || {
+        fail "Unable to run detected Ansible Python: ${ansible_python}"
+        return 1
+    }
+
+    return 0
+}
+
+
+# ==============================================================================
 # Command Checks
 # ==============================================================================
 
@@ -59,15 +115,12 @@ check_lab5_required_commands() {
 
     require_command ansible || failed=1
     require_command ansible-inventory || failed=1
-    require_command python3 || failed=1
     require_command dnf || failed=1
 
-    if command -v pip3 >/dev/null 2>&1; then
-        pass "Required command found: pip3"
-    elif python3 -m pip --version >/dev/null 2>&1; then
-        pass "Python pip module is available"
+    if get_ansible_python_interpreter >/dev/null 2>&1; then
+        pass "Ansible Python interpreter detected"
     else
-        warn "pip is not available yet"
+        fail "Could not detect Ansible Python interpreter"
         failed=1
     fi
 
@@ -117,10 +170,74 @@ install_rpm_package_if_missing() {
     pass "Package installation completed: ${package_name}"
 }
 
-install_lab5_os_packages() {
-    step "Installing Lab 5 OS packages"
+get_pip_package_for_ansible_python() {
+    local ansible_python="$1"
 
-    install_rpm_package_if_missing python3-pip
+    case "$ansible_python" in
+        /usr/bin/python3.12)
+            printf '%s\n' "python3.12-pip"
+            ;;
+        /usr/bin/python3)
+            printf '%s\n' "python3-pip"
+            ;;
+        *)
+            warn "No known RPM pip package mapping for ${ansible_python}"
+            return 1
+            ;;
+    esac
+}
+
+check_ansible_python_pip() {
+    local ansible_python
+
+    step "Checking pip for Ansible Python"
+
+    ansible_python="$(get_ansible_python_interpreter)" || return 1
+
+    info "Ansible Python: ${ansible_python}"
+
+    if "$ansible_python" -m pip --version >/dev/null 2>&1; then
+        "$ansible_python" -m pip --version
+        pass "pip is available for Ansible Python"
+        return 0
+    else
+        warn "pip is missing for Ansible Python: ${ansible_python}"
+        return 1
+    fi
+}
+
+install_ansible_python_pip_if_missing() {
+    local ansible_python
+    local pip_package
+
+    step "Ensuring pip is installed for Ansible Python"
+
+    ansible_python="$(get_ansible_python_interpreter)" || return 1
+
+    if "$ansible_python" -m pip --version >/dev/null 2>&1; then
+        "$ansible_python" -m pip --version
+        pass "pip already available for Ansible Python"
+        return 0
+    fi
+
+    pip_package="$(get_pip_package_for_ansible_python "$ansible_python")" || {
+        fail "Cannot determine pip RPM package for ${ansible_python}"
+        return 1
+    }
+
+    info "Ansible Python is missing pip"
+    info "Required RPM package: ${pip_package}"
+
+    install_rpm_package_if_missing "$pip_package"
+
+    if "$ansible_python" -m pip --version >/dev/null 2>&1; then
+        "$ansible_python" -m pip --version
+        pass "pip is now available for Ansible Python"
+        return 0
+    else
+        fail "pip is still missing for Ansible Python after installing ${pip_package}"
+        return 1
+    fi
 }
 
 
@@ -128,16 +245,21 @@ install_lab5_os_packages() {
 # Python WinRM Dependency Helpers
 # ==============================================================================
 
-check_python_module() {
+check_python_module_with_ansible_python() {
     local module_name="$1"
+    local ansible_python
 
-    step "Checking Python module: ${module_name}"
+    step "Checking Python module with Ansible Python: ${module_name}"
 
-    if python3 -c "import ${module_name}" >/dev/null 2>&1; then
-        pass "Python module is available: ${module_name}"
+    ansible_python="$(get_ansible_python_interpreter)" || return 1
+
+    info "Using Python: ${ansible_python}"
+
+    if "$ansible_python" -c "import ${module_name}" >/dev/null 2>&1; then
+        pass "Python module is available to Ansible Python: ${module_name}"
         return 0
     else
-        warn "Python module is missing: ${module_name}"
+        warn "Python module is missing from Ansible Python: ${module_name}"
         return 1
     fi
 }
@@ -145,48 +267,60 @@ check_python_module() {
 check_lab5_python_winrm_modules() {
     local failed=0
 
-    step "Checking Lab 5 Python WinRM modules"
+    step "Checking Lab 5 Python WinRM modules for Ansible Python"
 
-    check_python_module winrm || failed=1
-    check_python_module requests || failed=1
-    check_python_module requests_ntlm || failed=1
+    check_python_module_with_ansible_python winrm || failed=1
+    check_python_module_with_ansible_python requests || failed=1
+    check_python_module_with_ansible_python requests_ntlm || failed=1
 
     if (( failed == 0 )); then
-        pass "All Lab 5 Python WinRM modules are available"
+        pass "All Lab 5 Python WinRM modules are available to Ansible Python"
         return 0
     else
-        warn "One or more Lab 5 Python WinRM modules are missing"
+        warn "One or more Lab 5 Python WinRM modules are missing from Ansible Python"
         return 1
     fi
 }
 
 install_lab5_python_winrm_modules_for_user() {
+    local ansible_python
+
     step "Installing Lab 5 Python WinRM modules for current user"
 
     require_not_root
 
+    ansible_python="$(get_ansible_python_interpreter)" || return 1
+
     info "Current user: $(whoami)"
+    info "Using Ansible Python: ${ansible_python}"
     info "Installing: pywinrm requests requests-ntlm"
 
-    python3 -m pip install --user pywinrm requests requests-ntlm \
-        || die "Failed to install Lab 5 Python WinRM modules"
+    "$ansible_python" -m pip install --user pywinrm requests requests-ntlm \
+        || die "Failed to install Lab 5 Python WinRM modules for Ansible Python"
 
     pass "Lab 5 Python WinRM modules installed for current user"
 }
 
 show_lab5_python_dependency_versions() {
+    local ansible_python
+
     step "Showing Lab 5 Python dependency versions"
 
-    python3 --version || warn "Unable to show Python version"
+    ansible_python="$(get_ansible_python_interpreter)" || return 1
 
-    if python3 -m pip --version >/dev/null 2>&1; then
-        python3 -m pip --version
+    info "Ansible Python:"
+    "$ansible_python" --version || warn "Unable to show Ansible Python version"
+
+    info "pip:"
+    if "$ansible_python" -m pip --version >/dev/null 2>&1; then
+        "$ansible_python" -m pip --version
     else
-        warn "pip is not available"
+        warn "pip is not available for Ansible Python"
     fi
 
-    python3 -m pip show pywinrm requests requests-ntlm 2>/dev/null \
-        || warn "One or more Python packages are not visible to pip show"
+    info "Python package details:"
+    "$ansible_python" -m pip show pywinrm requests requests-ntlm 2>/dev/null \
+        || warn "One or more Python packages are not visible to Ansible Python pip"
 }
 
 
@@ -199,9 +333,11 @@ check_lab5_package_readiness() {
 
     step "Checking Lab 5 package readiness"
 
+    show_ansible_python_context || failed=1
     check_lab5_required_commands || failed=1
+    check_ansible_python_pip || failed=1
     check_lab5_python_winrm_modules || failed=1
-    show_lab5_python_dependency_versions
+    show_lab5_python_dependency_versions || failed=1
 
     if (( failed == 0 )); then
         pass "Lab 5 package readiness checks passed"
@@ -217,14 +353,19 @@ apply_lab5_python_dependencies() {
 
     require_not_root
 
-    if ! python3 -m pip --version >/dev/null 2>&1; then
-        fail "pip is not available for python3."
-        info "Run this first:"
-        info "sudo dnf install -y python3-pip"
+    if ! check_ansible_python_pip; then
+        fail "pip is missing for Ansible Python."
+        info "Run this first, using sudo:"
+        info "sudo dnf install -y python3.12-pip"
         return 1
     fi
 
-    install_lab5_python_winrm_modules_for_user
+    if check_lab5_python_winrm_modules; then
+        pass "Lab 5 Python WinRM modules are already installed"
+    else
+        install_lab5_python_winrm_modules_for_user
+    fi
+
     check_lab5_python_winrm_modules
     show_lab5_python_dependency_versions
 }
