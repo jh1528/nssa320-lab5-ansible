@@ -11,13 +11,14 @@
 #  - Check Linux Ansible connectivity from the control node
 #  - Check Windows 11 readiness for WinRM/Ansible management
 #  - Intentionally apply Lab 5 /etc/hosts desired state when requested
+#  - Intentionally apply Lab 5 ansible.cfg desired state when requested
 #  - Intentionally apply Lab 5 inventory desired state when requested
 #  - Print the required Figure 1 command sequence when ready
 #
 # Design:
 #  - Default check modes do not change system state.
 #  - Apply modes are explicit and intentional.
-#  - /etc/hosts and inventory.inv are generated from config/lab5.conf.
+#  - /etc/hosts, ansible.cfg, and inventory.inv are generated from desired state.
 #  - This keeps Lab 5 idempotent and avoids manual configuration drift.
 #
 # Author:
@@ -26,6 +27,15 @@
 # ==============================================================================
 # Version History
 # ==============================================================================
+#
+# Version: 5.2
+# Date: 2026-06-27
+#
+# Changes:
+#  - Added --apply-ansible-cfg mode to idempotently write ansible.cfg.
+#  - Added lib/ansiblecfg.sh source.
+#  - Added ansible.cfg validation to quick, full, and Windows-only checks.
+#  - Kept normal check modes read-only.
 #
 # Version: 5.1
 # Date: 2026-06-27
@@ -74,6 +84,7 @@ source "${BASE_DIR}/lib/common.sh"
 source "${BASE_DIR}/lib/hosts.sh"
 source "${BASE_DIR}/lib/checks.sh"
 source "${BASE_DIR}/lib/inventory.sh"
+source "${BASE_DIR}/lib/ansiblecfg.sh"
 
 
 # ==============================================================================
@@ -86,18 +97,20 @@ Usage:
   $0 [mode]
 
 Modes:
-  --quick             Run core reachability and Windows readiness checks
-  --full              Run all checks including Linux Ansible connectivity
-  --win-only          Check only Windows 11 readiness and win_ping
-  --apply-hosts       Idempotently write the Lab 5 /etc/hosts managed block
-  --apply-inventory   Idempotently write inventory.inv from config/lab5.conf
-  --help              Show this help message
+  --quick               Run core reachability and Windows readiness checks
+  --full                Run all checks including Linux Ansible connectivity
+  --win-only            Check only Windows 11 readiness and win_ping
+  --apply-hosts         Idempotently write the Lab 5 /etc/hosts managed block
+  --apply-ansible-cfg   Idempotently write ansible.cfg for Lab 5
+  --apply-inventory     Idempotently write inventory.inv from config/lab5.conf
+  --help                Show this help message
 
 Examples:
   ./scripts/lab5-act1-check.sh --quick
   ./scripts/lab5-act1-check.sh --full
   ./scripts/lab5-act1-check.sh --win-only
   sudo ./scripts/lab5-act1-check.sh --apply-hosts
+  ./scripts/lab5-act1-check.sh --apply-ansible-cfg
   ./scripts/lab5-act1-check.sh --apply-inventory
 
 Description:
@@ -106,8 +119,8 @@ Description:
   Normal check modes do not configure Windows or Linux. They only check current
   state and tell you what is ready or what needs attention.
 
-  Apply modes are intentional and idempotent. They converge local project files
-  or /etc/hosts to the desired state defined in config/lab5.conf.
+  Apply modes are intentional and idempotent. They converge /etc/hosts,
+  ansible.cfg, or inventory.inv to the desired Lab 5 state.
 EOF
 }
 
@@ -128,6 +141,7 @@ run_quick_checks() {
     show_lab5_host_plan
 
     check_ansible_project_files || failed=1
+    validate_lab5_ansible_cfg_file "./ansible.cfg" || failed=1
     validate_lab5_inventory_file "./inventory.inv" || failed=1
 
     check_all_host_resolution || failed=1
@@ -160,6 +174,7 @@ run_full_checks() {
     show_lab5_host_plan
 
     check_ansible_project_files || failed=1
+    validate_lab5_ansible_cfg_file "./ansible.cfg" || failed=1
     validate_lab5_inventory_file "./inventory.inv" || failed=1
 
     check_all_host_resolution || failed=1
@@ -194,6 +209,7 @@ run_windows_only_checks() {
     show_lab5_host_plan
 
     check_ansible_project_files || failed=1
+    validate_lab5_ansible_cfg_file "./ansible.cfg" || failed=1
     validate_lab5_inventory_file "./inventory.inv" || failed=1
 
     check_host_resolution "$WIN11_HOST" || failed=1
@@ -230,6 +246,15 @@ run_apply_hosts() {
     validate_hosts_resolution
 }
 
+run_apply_ansible_cfg() {
+    step "Applying Lab 5 ansible.cfg configuration"
+
+    require_not_root
+
+    write_lab5_ansible_cfg_file "./ansible.cfg"
+    validate_lab5_ansible_cfg_file "./ansible.cfg"
+}
+
 run_apply_inventory() {
     step "Applying Lab 5 inventory configuration"
 
@@ -262,6 +287,9 @@ main() {
             ;;
         --apply-hosts)
             run_apply_hosts
+            ;;
+        --apply-ansible-cfg)
+            run_apply_ansible_cfg
             ;;
         --apply-inventory)
             run_apply_inventory
