@@ -10,15 +10,18 @@
 #  - Confirm Lab 5 host resolution and reachability
 #  - Check Linux Ansible connectivity from the control node
 #  - Check Windows 11 readiness for WinRM/Ansible management
+#  - Check required Lab 5 Python WinRM dependencies
 #  - Intentionally apply Lab 5 /etc/hosts desired state when requested
 #  - Intentionally apply Lab 5 ansible.cfg desired state when requested
 #  - Intentionally apply Lab 5 inventory desired state when requested
+#  - Intentionally install user-level Python WinRM dependencies when requested
 #  - Print the required Figure 1 command sequence when ready
 #
 # Design:
 #  - Default check modes do not change system state.
 #  - Apply modes are explicit and intentional.
 #  - /etc/hosts, ansible.cfg, and inventory.inv are generated from desired state.
+#  - Python WinRM dependencies are installed only when --apply-python-deps is used.
 #  - This keeps Lab 5 idempotent and avoids manual configuration drift.
 #
 # Author:
@@ -27,6 +30,15 @@
 # ==============================================================================
 # Version History
 # ==============================================================================
+#
+# Version: 5.3
+# Date: 2026-06-27
+#
+# Changes:
+#  - Added lib/packages.sh source.
+#  - Added --check-packages mode.
+#  - Added --apply-python-deps mode for pywinrm, requests, and requests-ntlm.
+#  - Added package readiness checks to quick, full, and Windows-only modes.
 #
 # Version: 5.2
 # Date: 2026-06-27
@@ -85,6 +97,7 @@ source "${BASE_DIR}/lib/hosts.sh"
 source "${BASE_DIR}/lib/checks.sh"
 source "${BASE_DIR}/lib/inventory.sh"
 source "${BASE_DIR}/lib/ansiblecfg.sh"
+source "${BASE_DIR}/lib/packages.sh"
 
 
 # ==============================================================================
@@ -100,18 +113,22 @@ Modes:
   --quick               Run core reachability and Windows readiness checks
   --full                Run all checks including Linux Ansible connectivity
   --win-only            Check only Windows 11 readiness and win_ping
+  --check-packages      Check Lab 5 control node package/Python readiness
   --apply-hosts         Idempotently write the Lab 5 /etc/hosts managed block
   --apply-ansible-cfg   Idempotently write ansible.cfg for Lab 5
   --apply-inventory     Idempotently write inventory.inv from config/lab5.conf
+  --apply-python-deps   Install Python WinRM dependencies for the current user
   --help                Show this help message
 
 Examples:
   ./scripts/lab5-act1-check.sh --quick
   ./scripts/lab5-act1-check.sh --full
   ./scripts/lab5-act1-check.sh --win-only
+  ./scripts/lab5-act1-check.sh --check-packages
   sudo ./scripts/lab5-act1-check.sh --apply-hosts
   ./scripts/lab5-act1-check.sh --apply-ansible-cfg
   ./scripts/lab5-act1-check.sh --apply-inventory
+  ./scripts/lab5-act1-check.sh --apply-python-deps
 
 Description:
   Checks Lab 5 Activity 1 readiness from the control node.
@@ -120,7 +137,8 @@ Description:
   state and tell you what is ready or what needs attention.
 
   Apply modes are intentional and idempotent. They converge /etc/hosts,
-  ansible.cfg, or inventory.inv to the desired Lab 5 state.
+  ansible.cfg, inventory.inv, or Python WinRM dependencies to the desired Lab 5
+  state.
 EOF
 }
 
@@ -137,6 +155,8 @@ run_quick_checks() {
     require_not_root
 
     check_required_lab5_commands || failed=1
+    check_lab5_package_readiness || failed=1
+
     show_control_node_context
     show_lab5_host_plan
 
@@ -170,6 +190,8 @@ run_full_checks() {
     require_not_root
 
     check_required_lab5_commands || failed=1
+    check_lab5_package_readiness || failed=1
+
     show_control_node_context
     show_lab5_host_plan
 
@@ -205,6 +227,8 @@ run_windows_only_checks() {
     require_not_root
 
     check_required_lab5_commands || failed=1
+    check_lab5_package_readiness || failed=1
+
     show_control_node_context
     show_lab5_host_plan
 
@@ -228,6 +252,14 @@ run_windows_only_checks() {
         warn "Lab 5 Windows-only readiness checks found issues"
         return 1
     fi
+}
+
+run_check_packages() {
+    step "Checking Lab 5 package and Python dependency readiness"
+
+    require_not_root
+
+    check_lab5_package_readiness
 }
 
 
@@ -265,6 +297,14 @@ run_apply_inventory() {
     check_ansible_inventory_graph
 }
 
+run_apply_python_deps() {
+    step "Applying Lab 5 Python WinRM dependency setup"
+
+    require_not_root
+
+    apply_lab5_python_dependencies
+}
+
 
 # ==============================================================================
 # Main
@@ -285,6 +325,9 @@ main() {
         --win-only)
             run_windows_only_checks
             ;;
+        --check-packages)
+            run_check_packages
+            ;;
         --apply-hosts)
             run_apply_hosts
             ;;
@@ -293,6 +336,9 @@ main() {
             ;;
         --apply-inventory)
             run_apply_inventory
+            ;;
+        --apply-python-deps)
+            run_apply_python_deps
             ;;
         --help|-h)
             usage
