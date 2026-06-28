@@ -8,7 +8,7 @@
 # Purpose:
 #  - Check required control node commands for Lab 5
 #  - Detect the Python interpreter used by Ansible
-#  - Install pip for the Ansible Python interpreter when needed
+#  - Check whether pip is available for Ansible's Python interpreter
 #  - Install Python WinRM dependencies needed for Ansible Windows management
 #  - Verify that Ansible's Python can import winrm, requests, and requests_ntlm
 #
@@ -25,6 +25,15 @@
 # ==============================================================================
 # Version History
 # ==============================================================================
+#
+# Version: 5.2
+# Date: 2026-06-27
+#
+# Changes:
+#  - Fixed Ansible Python detection.
+#  - Replaced fragile sed parsing with grep/tr parsing.
+#  - Correctly detects /usr/bin/python3.12 from ansible --version.
+#  - Keeps package checks aligned with the Python interpreter Ansible actually uses.
 #
 # Version: 5.1
 # Date: 2026-06-27
@@ -66,7 +75,13 @@ LAB5_PACKAGES_SH_LOADED="true"
 get_ansible_python_interpreter() {
     local python_path
 
-    python_path="$(ansible --version 2>/dev/null | awk -F'[()]' '/python version/ {print $2}' | awk '{print $1}')"
+    python_path="$(
+        ansible --version 2>/dev/null |
+        grep 'python version' |
+        grep -o '(/[^)]*python[0-9.]*[^)]*)' |
+        tail -n 1 |
+        tr -d '()'
+    )"
 
     if [[ -z "$python_path" ]]; then
         fail "Could not detect Ansible Python interpreter from ansible --version"
@@ -116,6 +131,8 @@ check_lab5_required_commands() {
     require_command ansible || failed=1
     require_command ansible-inventory || failed=1
     require_command dnf || failed=1
+    require_command grep || failed=1
+    require_command tr || failed=1
 
     if get_ansible_python_interpreter >/dev/null 2>&1; then
         pass "Ansible Python interpreter detected"
